@@ -1,0 +1,48 @@
+1. Test Signup Route
+Route: POST http://localhost:3000/api/auth/signup
+
+Body (JSON):
+
+json
+Copy code
+{
+  "email": "testuser@example.com",
+  "password": "securePassword123"
+}
+Expected Response:
+
+200 OK
+
+JSON with user data and token.
+------------------------------------------------------
+3. Test Login Route
+Route: POST http://localhost:3000/api/auth/login
+
+Body (JSON):
+
+json
+Copy code
+{
+  "email": "testuser@example.com",
+  "password": "securePassword123"
+}
+-----------------------------------------------------
+4. Test Protected Route (Get Current User)
+Route: GET http://localhost:3000/api/auth/me
+
+Headers:
+
+makefile
+Copy code
+Authorization: Bearer <your_token_from_login>
+Expected Response:
+
+200 OK
+
+JSON with user info
+--------------------admin---------------------
+{
+  "email": "admin@example.com",
+  "password": "admin123",
+  "role": "admin"
+}

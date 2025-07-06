@@ -1,0 +1,165 @@
+const express = require('express');
+const router = express.Router();
+const multer = require('multer');
+const path = require('path');
+const crypto = require('crypto');
+const fs = require('fs');
+
+const File = require('../Models/File');
+const AccessLog = require('../models/AccessLog');
+const { jwtAuthMiddleware } = require('../middleware/jwt');
+
+
+// Multer config
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, '../uploads');
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${file.originalname}`;
+    cb(null, uniqueName);
+  }
+});
+const upload = multer({ storage });
+
+// Utility: Encrypt a file (you can plug this in later if needed)
+const encryptFile = (filePath, password) => {
+  const cipher = crypto.createCipher('aes-256-cbc', password);
+  const input = fs.createReadStream(filePath);
+  const output = fs.createWriteStream(filePath + '.enc');
+
+  input.pipe(cipher).pipe(output);
+};
+
+// Utility: Decrypt a file (for future use if needed)
+const decryptFile = (filePath, password, res) => {
+  const decipher = crypto.createDecipher('aes-256-cbc', password);
+  const input = fs.createReadStream(filePath);
+  input.pipe(decipher).pipe(res);
+};
+
+// @route   POST /api/files/upload
+// @desc    Upload and store file
+router.post('/upload', jwtAuthMiddleware, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const token = crypto.randomBytes(16).toString('hex');
+
+    const newFile = new File({
+      filename: req.file.filename,
+      originalname: req.file.originalname,
+      path: req.file.path,
+      size: req.file.size,
+      uploadedBy: req.user.id,
+      password: req.body.password || null,
+      expiresAt: req.body.expiresIn ? new Date(Date.now() + parseInt(req.body.expiresIn)) : null,
+      token // ✅ set the token
+    });
+
+    const savedFile = await newFile.save();
+    res.status(200).json({ message: 'File uploaded successfully', file: savedFile });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Upload failed' });
+  }
+});
+
+// @route   GET /api/files/:token
+// @desc    Access or download file
+router.get('/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const file = await File.findOne({ token });
+
+    if (!file) return res.status(404).json({ error: 'File not found' });
+
+    // Check expiry
+    if (file.expiresAt && new Date() > file.expiresAt) {
+      return res.status(410).json({ error: 'File expired' });
+    }
+
+    // Check download count
+    if (file.maxDownloads && file.downloadCount >= file.maxDownloads) {
+      return res.status(410).json({ error: 'Download limit exceeded' });
+    }
+
+    // If password is required, deny until verified
+    if (file.password) {
+      return res.status(403).json({ error: 'Password required' });
+    }
+
+    // Update download count
+    file.downloadCount += 1;
+    await file.save();
+
+    // Log access
+    await AccessLog.create({
+      file: file._id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    res.download(file.path, file.filename);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to access file' });
+  }
+});
+
+// @route   POST /api/files/:token/verify
+// @desc    Verify password for protected files
+router.post('/:token/verify', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { password } = req.body;
+
+    const file = await File.findOne({ token });
+    if (!file) return res.status(404).json({ error: 'File not found' });
+
+    if (file.password !== password) {
+      return res.status(401).json({ error: 'Incorrect password' });
+    }
+
+    // Update download count
+    file.downloadCount += 1;
+    await file.save();
+
+    // Log access
+    await AccessLog.create({
+      file: file._id,
+      ip: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    res.download(file.path, file.filename);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Password verification failed' });
+  }
+});
+
+// @route   GET /api/files/:token/logs
+// @desc    Get access logs (owner only)
+router.get('/:token/logs', jwtAuthMiddleware, async (req, res) => {
+  try {
+    const { token } = req.params;
+    const file = await File.findOne({ token });
+
+    if (!file) return res.status(404).json({ error: 'File not found' });
+
+    if (file.owner.toString() !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    const logs = await AccessLog.find({ file: file._id }).sort({ accessedAt: -1 });
+    res.json(logs);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch logs' });
+  }
+});
+
+module.exports = router;
